@@ -1,0 +1,1150 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="WinkleGold_Extender_GUI"
+   author="Multiple"
+   id="3f498d929793c12cb70f5999"
+   language="Lua"
+   purpose="UI Gui for Extender"
+   date_written="2011-08-29 15:35:02"
+   requires="4.51"
+   version="1.4"
+   save_state="y"
+   >
+</plugin>
+
+<aliases>
+	<alias
+		match="^xset reset gui$"
+		regexp="y"
+		enabled="y"
+		sequence="100"
+		script="reset_gui"
+	>
+	</alias>
+	
+	<alias
+		match="^xset gui minimize$"
+		regexp="y"
+		enabled="y"
+		sequence="100"
+		send_to="12"
+	>
+	<send>
+		mouseup(0, "hsMinimize")
+	</send>
+	</alias>
+	
+</aliases>
+
+<triggers>
+	<trigger 
+		name="trg_cp_complete"
+		match="^CONGRATULATIONS! You have completed your campaign.$"
+		regexp="y"
+		enabled="y"
+		sequence="100"
+		script="do_trg_cp_complete"
+	>
+	</trigger>
+	<trigger 
+		name="trg_gq_complete"
+		match="^You are not in a global quest.$"
+		regexp="y"
+		enabled="y"
+		sequence="100"
+		script="do_trg_gq_complete"
+	>
+	</trigger>
+	<trigger match="^You still have to kill (?<qty>[0-9]) \* (?<mob>[^\(]+) \((?<where>.+?)(?<isdead> - Dead)?\)$"
+		name="trg_gq_line"
+		enabled="n" 
+		regexp="y"
+		sequence="10"
+		script="do_trg_gq_line"
+		>
+	</trigger>
+	<trigger match="^(?!You still have to kill).*$"
+		name="trg_gq_line_end"
+		enabled="n"
+		regexp="y"
+		sequence="10"
+		script="do_trg_gq_line_end"
+		>
+	</trigger>
+
+</triggers>
+
+<script>
+<![CDATA[
+
+require "serialize"
+require "tprint"
+require "movewindow"
+require "mw"
+require "gmcphelper"
+
+local cpList = {}
+local gqList = {}
+
+RESIZE_TAG_SIZE = 13		-- Size of the zone for resizing via drag
+REFRESH_DELAY = 0.066		-- Controls delay between Redraws while resizing.
+
+--local win_minimum_width = 280
+--local win_minimum_height = 40+RESIZE_TAG_SIZE
+
+local win_height = 300
+--local min_height = 45 + RESIZE_TAG_SIZE
+local min_height = 18
+local min_width = 150
+local max_height = 300
+local currentListHeight = 0
+local lastRefresh = 0
+
+local win_width = 200
+--local win_width = 350
+local win_state = GetVariable("WinState") or "max"
+local win_init = false
+
+local windowinfo = {}
+local hotspots = {}
+local itemHotspots = {}
+local win = "extender_gui_" .. GetPluginID ()  -- get a unique name, ensure not empty if outside plugin
+
+local z_order_plugin = "462b665ecb569efbf261422f"
+local vi_assist_id = "6000a4c6f0e71d31fecf523d"
+local mapper_extender_id = "b6eae87ccedd84f510b74715"
+local search_destroy_id = "e50b1d08a0cfc0ee9c442001"
+
+local mobsubsFilePath = GetPluginInfo(GetPluginID(), 20) .. "WinkleGold_Database.db"
+
+local win_width = tonumber(GetVariable("WinSizeX")) or 280
+local win_height = tonumber(GetVariable("WinSizeY")) or 280
+local pos_x = GetVariable("WinPosX") or 0
+local pos_y = GetVariable("WinPosY") or 0
+local win_width_maximized = tonumber(GetVariable("WinMaxX")) or min_width
+local win_height_maximized = tonumber(GetVariable("WinMaxY")) or 280
+
+local current_mode = "cp"
+local current_index = 0
+local currentRoom
+if gmcp("room.info") ~= nil then
+   currentRoom = gmcp("room.info")
+end
+local offset = 30
+local questOffset = 0
+local line_spacing = 17
+
+local setting_fontName = GetVariable("fontName") or "Courier New"
+local setting_fontSize = GetVariable("fontSize") or "10"
+local setting_fontColour = GetVariable("fontColour") or "White"
+
+local color_main_output = GetVariable("color_main_output") or "LightSkyBlue"
+local color_main_mobs = GetVariable("color_main_mobs") or "Silver"
+local color_main_areas = GetVariable("color_main_areas") or "LightSkyBlue"
+local color_unknown_location = GetVariable("color_unknown_location") or "DarkOrange"
+local color_list_headers = GetVariable("color_list_headers") or "Gray"
+local color_gui_list_color = GetVariable("color_gui_list_color") or "White"
+local color_gui_current_target = GetVariable("color_gui_current_target") or "LimeGreen"
+local color_gui_quest = GetVariable("color_gui_quest") or "CadetBlue"
+local color_gui_quest_complete = GetVariable("color_gui_quest_complete") or "Red"
+
+local USER_qq_report_channel = "gt" -- group tell
+
+
+function create_win()
+
+	if (win_init == false) then
+
+		win_init = true
+		--< windowinfo = movewindow.install (win, miniwin.pos_center, miniwin.create_absolute_location, false, nil, {mouseup=mouseup, mousedown=LeftClickOnly, dragmove=LeftClickOnly, dragrelease=LeftClickOnly},{x=pos_x, y=pos_y})
+		WindowCreate (win, 0, 0, win_width, win_height, miniwin.pos_center_all, 0, ColourNameToRGB("black"))  -- create window
+		
+		-- move the window to the new location
+		WindowPosition(win, pos_x, pos_y, 
+			miniwin.pos_stretch_to_view, 
+			miniwin.create_absolute_location)
+			
+		WindowShow(win,  true)  -- show it 
+
+		if (win_state == "min") then
+			mouseup(0, "hsMinimize")
+		end		
+		
+		WindowFont(win, "button", "Courier New", 10, true, false, false, false) -- define font
+		
+		--if setting_fontName ~= nil then
+			WindowFont(win, "font", setting_fontName, tonumber(setting_fontSize), false, false, false, false) -- define font
+		--else
+		--	WindowFont(win, "font", "Courier New", 10, false, false, false, false) -- define font
+		--end
+		
+		if (IsPluginInstalled(z_order_plugin) and GetPluginInfo(z_order_plugin, 17)) then
+			CallPlugin(z_order_plugin, "registerMiniwindow", win)
+			CallPlugin(z_order_plugin, "boostMe", win)
+		end		
+		mouseup(0, "hsMinimize")
+		draw_window()
+		
+	end
+end
+
+function reset_colors()
+   color_main_output = "LightSkyBlue"
+   color_list_headers = "Gray"
+   color_gui_current_target = "LimeGreen"
+   color_main_mobs = "Silver"
+   color_main_areas = "LightSkyBlue"
+   color_unknown_location = "DarkOrange"
+   color_gui_list_color = "White"
+   color_gui_quest = "CadetBlue"
+   color_gui_quest_complete = "Red"
+   ColourNote("DarkOrange", "", "All color settings have been reset to default values.")
+   SaveState()
+end
+   
+function context_menu()
+		result = WindowMenu (win,
+		WindowInfo (win, 14),		-- x position
+		WindowInfo (win, 15),		-- y position
+		"Minimize|Maximize|-|Change Font|>Customize Colors|Main Output|Mob Names|Area/Room Names|Unknown Location|List Headers|-|GUI List Color|GUI Current Target|GUI Quest Mob|GUI Quest Complete|-|[reset colors to default]|<|Add Custom Mob Substitution|-|Bring to Front|Send to Back")
+		
+      local newColor
+		if (result == "Change Font") then
+			
+			local fontSelection = utils.fontpicker(setting_fontName, setting_fontSize, 255255255)
+			if fontSelection == nil then DebugNote("User cancelled font selection") return end
+			setting_fontName = fontSelection.name
+			setting_fontSize = fontSelection.size
+			setting_fontColour = fontSelection.colour
+			WindowFont(win, "font", setting_fontName, setting_fontSize, false, false, false, false) -- define font
+			draw_window()
+			write_items()
+			Redraw()
+			SaveState()
+      elseif result == "Minimize" then
+         mouseup(0, "hsMinimize")
+      elseif result == "Maximize" then
+         mouseup(0, "hsMaximize")
+         draw_window()
+         write_items(current_mode)
+         Redraw()
+      elseif result == "Main Output" then
+         newColor = PickColour(ColourNameToRGB(color_main_output))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_main_output = RGBColourToName(newColor)
+         ColourNote(color_main_output, "", "You have chosen this color for the main output color for xcp/qq checks.")
+         SaveState()
+      elseif result == "Mob Names" then
+         newColor = PickColour(ColourNameToRGB(color_main_mobs))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_main_mobs = RGBColourToName(newColor)
+         ColourNote(color_main_mobs, "", "You have chosen this color for the main output color for mob names in checks and searches.")
+         SaveState()
+      elseif result == "Area/Room Names" then
+         newColor = PickColour(ColourNameToRGB(color_main_areas))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_main_areas = RGBColourToName(newColor)
+         ColourNote(color_main_areas, "", "You have chosen this color for the main output color for area and room names in checks and searches.")
+         SaveState()
+      elseif result == "Unknown Location" then
+         newColor = PickColour(ColourNameToRGB(color_unknown_location))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_unknown_location = RGBColourToName(newColor)
+         ColourNote(color_unknown_location, "", "You have chosen this color for the main output color for unknown locations in checks.")
+         SaveState()
+      elseif result == "List Headers" then
+         newColor = PickColour(ColourNameToRGB(color_list_headers))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_list_headers = RGBColourToName(newColor)
+         ColourNote(color_list_headers, "", "You have chosen this color for the main output color for header/footers during xcp/qq checks.")
+         SaveState()
+      elseif result == "GUI List Color" then
+         newColor = PickColour(ColourNameToRGB(color_gui_list_color))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_gui_list_color = RGBColourToName(newColor)
+         ColourNote(color_gui_list_color, "", "You have chosen this color for the GUI window primary list color.")
+         SaveState()
+      elseif result == "GUI Current Target" then
+         newColor = PickColour(ColourNameToRGB(color_gui_current_target))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_gui_current_target = RGBColourToName(newColor)
+         ColourNote(color_gui_current_target, "", "You have chosen this color for the GUI window primary list color.")
+         SaveState()
+      elseif result == "GUI Quest Mob" then
+         newColor = PickColour(ColourNameToRGB(color_gui_quest))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_gui_quest = RGBColourToName(newColor)
+         ColourNote(color_gui_quest, "", "You have chosen this color for the GUI window color for the current quest mob's information.")
+         SaveState()
+      elseif result == "GUI Quest Complete" then
+         newColor = PickColour(ColourNameToRGB(color_gui_quest_complete))
+         if newColor == nil or newColor == -1 then print("Cancelled color selection.") return end
+         color_gui_quest_complete = RGBColourToName(newColor)
+         ColourNote(color_gui_quest_complete, "", "You have chosen this color for the GUI window color for quests that have already been completed and are awaiting turn-in.")
+         SaveState()
+      elseif result == "[reset colors to default]" then
+         reset_colors()
+      elseif result == "Add Custom Mob Substitution" then
+         Execute("mobsub C")
+      elseif result == "Bring to Front" then
+         if (IsPluginInstalled(z_order_plugin) and GetPluginInfo(z_order_plugin, 17)) then
+            CallPlugin(z_order_plugin, "boostMe", win)
+         else
+            print("z_order_plugin is not installed or enabled, cannot send to front")
+         end
+      elseif result == "Send to Back" then
+         if (IsPluginInstalled(z_order_plugin) and GetPluginInfo(z_order_plugin, 17)) then
+            CallPlugin(z_order_plugin, "dropMe", win)
+         else
+            print("z_order_plugin is not installed or enabled, cannot send to back")
+         end
+		end
+end
+function str_not_empty(s)
+	if s == "" then
+		return false
+	end
+	return true
+end
+
+function list_item_context_menu(index)
+	local list
+	local result = WindowMenu (win,
+		WindowInfo (win, 14),		-- x position
+		WindowInfo (win, 15),		-- y position
+		"Minimize|Maximize|-|Add mob substitution|Clear mob substitution")
+
+		local mobSub = {}
+      local mobName
+		
+      if current_mode == "cp" then
+			list = cpList
+		elseif current_mode == "gq" then
+			list = gqList
+		end
+      if index ~= "Q" then
+         for key, value in ipairs(list) do
+            if key == tonumber(index) then mobSub.name = value.mob mobSub.area = value.areaId end
+         end
+      end
+		
+	if result == "Add mob substitution" then
+      Execute("mobsub " .. index)
+      
+   elseif result == "Clear mob substitution" then
+      if get_substitute_name(mobSub.name, mobSub.area) ~= nil then
+         Execute("delmobsub " .. index)
+      else
+         print("No mob substitution exists for \"" .. mobSub.name .. "\"")
+      end
+   elseif result == "Minimize" then
+      mouseup(0, "hsMinimize")
+   elseif result == "Maximize" then
+      mouseup(0, "hsMaximize")
+      draw_window()
+      write_items(current_mode)
+      Redraw()
+	end
+end
+
+function get_substitute_name(mobname, areaid)
+   local get_substitute_name_sql =  
+      "SELECT * " ..
+      "FROM mobsubs " ..
+      "WHERE mobname like %s AND areaid = %s "
+   local function file_exists(name)
+      local f=io.open(name,"r")
+      if f~=nil then io.close(f) return true else return false end
+   end
+	if not file_exists(mobsubsFilePath) then
+		DebugNote("WARNING: No mobsubs database file found. Not using substitution db.")
+		return nil
+	end
+	DebugNote("get_substitute_name : " .. mobname ..":".. areaid)
+	
+	--TODO - cache the result of a found hit in a table
+--		local key = 
+	
+	local db = sqlite3.open(mobsubsFilePath)
+	
+
+	local select = string.format (get_substitute_name_sql, fixsql(mobname), fixsql(areaid))
+	
+	for row in db:nrows(select) do
+		DebugNote("substitute name: " .. row.subname)
+		local sub = {
+			mobName = row.mobname,
+			areaId = row.areaid,
+			subName = row.subname,
+			noHunt = row.nohunt,
+			noWhere = row.nowhere,
+			noScan = row.noscan,
+			roomId = row.roomid,
+			comment = row.comment
+		}
+		db:close_vm()
+		return sub
+		
+	end
+	
+	db:close_vm()
+	return nil
+
+end
+
+function draw_window()
+	-- clear the window
+	WindowRectOp (win, miniwin.rect_fill, 0, 0, 0, 0, ColourNameToRGB("Black"))
+
+	-- border
+	WindowRectOp (win, 1, 0, 0, 0, 0, ColourNameToRGB("Silver"), 15)
+	WindowRectOp (win, 1, 1, 1, -1, -1, 0x777777, 15)
+	
+   -- draw the resize widget bottom right corner.
+   local draw_resize = 1
+   if (draw_resize == 1) then
+	   WindowLine(win, win_width-3,  win_height-2, win_width-2, win_height-3, 0xffffff, 0, 2)
+	   WindowLine(win, win_width-4,  win_height-2, win_width-2, win_height-4, 0x696969, 0, 1)
+	   WindowLine(win, win_width-6,  win_height-2, win_width-2, win_height-6, 0xffffff, 0, 2)
+	   WindowLine(win, win_width-7,  win_height-2, win_width-2, win_height-7, 0x696969, 0, 1)
+	   WindowLine(win, win_width-9,  win_height-2, win_width-2, win_height-9, 0xffffff, 0, 2)
+	   WindowLine(win, win_width-10, win_height-2, win_width-2, win_height-10, 0x696969, 0, 1)
+	   WindowLine(win, win_width-12, win_height-2, win_width-2, win_height-12, 0xffffff, 0, 2)
+	   WindowLine(win, win_width-13, win_height-2, win_width-2, win_height-13, 0x696969, 0, 1)
+	end
+	   
+	-- drag bar --------------------------
+	WindowRectOp (win, miniwin.rect_draw_edge, 0, 0, 0, 18 - win_height, 
+		miniwin.rect_edge_raised, 
+		miniwin.rect_edge_at_all + 
+		miniwin.rect_option_fill_middle)  -- raised, filled
+		
+			
+	WindowText (win, "button", 
+				"Search & Destroy GUI",    -- text
+				2, 2, 0, 18 - win_height,
+				ColourNameToRGB ("Black"), -- colour
+				false) 
+
+	if (hotspots["hsDrag1"] == nil) then
+		hotspots["hsDrag1"] = WindowAddHotspot(win, 
+					"hsDrag1",  -- HS id
+					0, 0, -80, 18 - win_height, -- rectangle
+					"mouseover", 
+					"cancelmouseover", 
+					"mousedown",
+					"cancelmousedown", 
+					"mouseup", 
+					"Drag to move",  -- tooltip text
+					miniwin.cursor_both_arrow, 0)  -- 4-way arrows
+		
+					
+		WindowDragHandler(win, "hsDrag1", "dragmove", "dragrelease", 0) 
+	end
+
+	-- system buttons --------------------------
+	draw_button(win_width - 15, 0, 15, 18, "^", "hsMaximize", "Maximize Window")
+	draw_button(win_width - 30, 0, 15, 18, "-", "hsMinimize", "Minimize Window")
+	--draw_button(win_width - 45, 0, 15, 15, "B", "hsBack", "send window to the Back")
+	--draw_button(win_width - 60, 0, 15, 15, "f", "hsFront", "bring window to the Front")
+	draw_button(win_width - 45, 0, 15, 18, "?", "hsHelp", "show ww help")
+	
+	-- go button --------------------------
+	draw_button(5, 20, 35, 20, "go", "hsGo", "Go to Room 1", 10)
+
+	-- quickscan button --------------------------
+	draw_button(40, 20, 35, 20, "qs", "hsQS", "Quick-Scan for your hunted mob", 2)
+
+	-- next button --------------------------
+	draw_button(75, 20, 35, 20, "nx", "hsNext", "Go to Next Room", 10)
+
+	-- kill button --------------------------
+	draw_button(110, 20, 35, 20, "ak", "hsKill", "Kill last searched mob")
+
+	-- refresh button --------------------------
+	draw_button(150, 20, 55, 20, "check", "hsRefresh", "Refresh current listing")
+	
+	-- hunt-trick abort button --------------------------
+	--draw_button(240, 20, 30, 20, "hta", "hsHTA", "Abort hunt-trick", 2)
+
+	-- v3 --
+	-- gq report button --------------------------
+	--draw_button(270, 20, 35, 20, "Rpt", "hsReport", "Report your GQ mobs to your default channel") -- GQ remove
+
+	-- clear contents button --------------------------
+	--draw_button(310, 20, 35, 20, "Clr", "hsClear", "Clear Window")
+
+	
+	--if (win_state == "min") then
+	--	return
+	--end
+	
+	-- This works for some reason
+	if (WindowHotspotInfo(win, "hsHelp", 1) ~= nil) then
+		hotspots = WindowHotspotList(win)
+	end
+
+		-- Hotspot for resizer.
+	if (WindowHotspotInfo(win, "hsResize", 1) == nil) then
+		WindowAddHotspot(win, "hsResize", win_width-RESIZE_TAG_SIZE, win_height-RESIZE_TAG_SIZE, win_width, win_height, "", "", "mousedown", "", "", "", 6, 0)
+		WindowDragHandler(win, "hsResize", "ResizeMoveCallback", "ResizeReleaseCallback", 0)
+	else
+		WindowMoveHotspot(win, "hsResize", win_width-RESIZE_TAG_SIZE, win_height-RESIZE_TAG_SIZE, 0, 0)
+	end
+	
+end
+
+function mousedown(flags, hotspot_id)
+	if (hotspot_id == "hsResize") then
+		startx, starty = WindowInfo (win, 17), WindowInfo (win, 18)
+	elseif (hotspot_id == "hsDrag1") then
+		startx, starty = WindowInfo (win, 14), WindowInfo (win, 15)
+	end
+end
+
+function draw_button(left, top, width, height, text, hsName, hint, textOffset)
+
+	if (textOffset == nil) then
+		textOffset = 5
+	end
+
+	WindowRectOp (win, miniwin.rect_draw_edge, 
+		left, top, (left + width) - win_width, (top + height) - win_height, 
+		miniwin.rect_edge_raised, 
+		miniwin.rect_edge_at_all + 
+		miniwin.rect_option_fill_middle)  -- raised, filled
+
+	WindowText(win, "button", 
+				text,   -- button text
+				left + textOffset, top + 3, (left + width) - win_width, (top + height) - win_height,        -- rectangle
+				ColourNameToRGB ("darkgreen"), -- colour
+				false)              -- not Unicode
+	
+	if (hotspots[hsName] == nil) then
+		hotspots[hsName] = WindowAddHotspot(win, 
+					hsName,  -- HS id
+					left, top, (left + width) - win_width, (top + height) - win_height,  -- rectangle
+					"mouseover", 
+					"cancelmouseover", 
+					"mousedown",
+					"cancelmousedown", 
+					"mouseup", 
+					"Click to " .. (hint or text),  -- tooltip text
+					miniwin.cursor_hand, 0)  -- 4-way arrows
+	end
+end
+
+function write_items(mode)
+	if mode ~= nil then DebugNote("write_items: " .. mode) end
+	
+	--clear cp items
+	for key, value in ipairs(itemHotspots) do
+		--Note(key, value)
+		WindowDeleteHotspot (win, value);
+	end
+	itemHotspots = {}
+
+	if (win_state == "min") then
+		return
+	end
+
+	if mode == "gq" then
+		write_list_items(gqList)
+	else
+		write_list_items(cpList)
+	end
+end
+
+function write_list_items(list)
+   --print("write_list_items() called with list size of " .. #list)
+	-- draw items
+	local index = 0
+   local strQuest
+   local questColor = color_gui_quest
+   if questInfo ~= nil and questInfo.mobName ~= nil then
+      if questInfo.completed then
+         strQuest = "** Quest Awaiting Turn-in **"
+         questColor = color_gui_quest_complete
+      else
+         strQuest = "Q) " .. questInfo.mobName .. " (" .. questInfo.area .. ") " .. questInfo.roomName
+      end
+      --DebugNote("write_list_items() Mob is: " .. questInfo.mobName .. " mode is " .. current_mode .. " Offset is " .. questOffset)
+      WindowText (win, "font", 
+         strQuest,   -- text
+         5, offset + questOffset, 0, 0,        -- rectangle
+         ColourNameToRGB(questColor),
+         false)              -- not Unicode
+         width   = WindowTextWidth (win, "font", strQuest)  -- width of text
+		   height  = WindowFontInfo (win, "font", 1)   -- height of the font
+         local hsHeight = 11 + offset + questOffset - win_height
+         local hsLength = (5 + width) - win_width
+         
+         if (hsHeight > 0) then hsHeight = 0 end
+         if (hsLength > 0) then hsLength = 0 end
+      
+   		WindowAddHotspot(win, 
+						99,  -- HS id
+						5, offset + questOffset, hsLength, hsHeight, -- rectangle
+						"mouseover", 
+						"cancelmouseover", 
+						"mousedown",
+						"cancelmousedown", 
+						"mouseup_list_item",
+						"Click to go to\r\n" .. questInfo.mobName .. "\r\n" .. questInfo.roomName .. "\r\n" .. questInfo.area,  -- tooltip text
+						miniwin.cursor_hand, 0)  -- hand cursor
+   end
+   
+	for key, value in ipairs(list) do
+
+		index = index + 1
+
+		local qty = ""
+		if (value.qty > 1) then
+			qty = string.format("%s * ", value.qty)
+		end
+		
+		local mobText = value.mob
+		local deadFlag = false
+		if (value.isDead ~= nil and value.isDead ~= "") then
+			mobText = mobText .. " [Dead]"
+			deadFlag = true
+		end
+		
+		
+		-- this removes prepended a, an, the from mob names in the gui window
+		patterns = {"^a%s", "^an%s", "^The%s", "^the%s"}
+		for index, value in ipairs(patterns) do
+			mobText = string.gsub(mobText, value, "", 1)
+		end
+		
+		local place
+		local color
+		if (value.type == "area") then
+			place = string.format("(%s)", value.areaId)
+			if (deadFlag == false) then
+				--color = "white"
+            color = color_gui_list_color
+			else
+				color = "DimGray"
+			end
+		elseif (value.type == "room") then
+			place = string.format("'%s' (%s) [%s-%s]", value.roomName, value.areaId, value.min, value.max)
+			if (deadFlag == false) then
+				color = "LightBlue"
+			else
+				color = "DimGray"
+			end
+		else -- unknown
+			place = string.format("'%s' is Unknown", value.roomName, value.areaId)
+			if (deadFlag == false) then
+				color = "DarkOrange"
+			else
+				color = "DarkRed"
+			end
+		end
+	
+		if index == current_index then
+			color = color_gui_current_target
+      elseif currentRoom ~= nil and currentRoom.zone ~= nil and currentRoom.zone == value.areaId then
+         color = "yellowgreen"
+      end
+		
+		local displayText
+      if value.mobDB and #value.mobDB > 0 then
+         displayText = string.format("*%s) %s%s - %s", index, qty, mobText, place)
+      else
+         displayText = string.format(" %s) %s%s - %s", index, qty, mobText, place)
+      end
+		--Note(displayText)
+
+		width   = WindowTextWidth (win, "font", displayText)  -- width of text
+		height  = WindowFontInfo (win, "font", 1)   -- height of the font
+		ascent  = WindowFontInfo (win, "font", 2)   -- ascent (amount above the baseline)
+		descent = WindowFontInfo (win, "font", 3)   -- descent (amount below the baseline)
+		leading = WindowFontInfo (win, "font", 4)   -- leading (space above the highest letter)
+		--Note(string.format("w:%s h:%s asc:%s desc:%s lead:%s", width, height, ascent, descent, leading)) 		
+		
+		WindowText (win, "font", 
+					displayText,   -- text
+					5, (tonumber(key) * line_spacing) + offset + questOffset, 0, 0,        -- rectangle
+					ColourNameToRGB (color),
+					false)              -- not Unicode
+				
+		local hsLength = (5 + width) - win_width
+		if (hsLength > 0) then hsLength = 0 end
+		local hsHeight = ((tonumber(key) * line_spacing) + 11 + offset + questOffset) - win_height
+      if (hsHeight > 0) then hsHeight = 0
+      
+		elseif (tonumber(key) * line_spacing + offset + questOffset + hsHeight > win_height - RESIZE_TAG_SIZE) then
+      
+			-- Prevent list item's hotspot from overlapping with the resize tag
+			if (hsLength > win_width - RESIZE_TAG_SIZE) then hsLength = win_width - RESIZE_TAG_SIZE end
+		end
+
+		--Note(string.format("%s %s %s %s", 5, (tonumber(key) * line_spacing) + offset, hsLength, hsHeight))
+
+		local eventHandler
+		
+		itemHotspots[#itemHotspots+1] = key
+		WindowAddHotspot(win, 
+						key,  -- HS id
+						5, (tonumber(key) * line_spacing) + offset + questOffset, hsLength, hsHeight, -- rectangle
+						"mouseover", 
+						"cancelmouseover", 
+						"mousedown",
+						"cancelmousedown", 
+						"mouseup_list_item",
+						"Click to go to\r\n" .. value.mob .. "\r\n" .. place,  -- tooltip text
+						miniwin.cursor_hand, 0)  -- hand cursor
+	end
+
+end
+
+function OnPluginBroadcast (msg, id, name, text)
+
+	if (id == '3e7dedbe37e44942dd46d264') then
+   -- GMCP
+      if (text == "room.info") then
+         if gmcp("room.info.zone") ~= currentRoom.zone then
+            --we changed areas let's redraw/update the gui to reflect this
+            currentRoom = gmcp("room.info")
+            draw_window()
+            write_items(current_mode)
+            Redraw()
+         else
+            currentRoom = gmcp("room.info")
+         end
+         
+      end
+   -- Mapper Extender Plugin
+	elseif (id == mapper_extender_id) then -- Mapper Extender
+
+		if (msg == 667) then
+      
+			-- load serialize.save_simple data
+			luastmt = "obj = " .. text
+			assert (loadstring (luastmt or "")) ()
+
+			-- disable fallback triggers
+			EnableTrigger("trg_gq_line", false)
+			EnableTrigger("trg_gq_line_end", false)			
+			
+			gqList = obj
+         
+			if gqList ~= nil and #gqList > 0 then
+				currentListHeight = line_spacing * #gqList
+				currentListHeight = currentListHeight + offset + 30 + questOffset
+            current_mode = "gq"
+            
+            mouseup(0, "hsMaximize")
+            draw_window()
+            write_items("gq")
+            Redraw()
+			else
+            --test fix for gq not clearing
+            --print("fix happened")
+            current_mode = "cp"
+            mouseup(0, "hsMinimize")
+            draw_window()
+            write_items("cp")
+            Redraw()
+            CallPlugin("b6eae87ccedd84f510b74715", "silent_check_cp")
+         end
+
+			-- if we receive this data, maximize and show data
+			
+		elseif (msg == 669) then
+			-- load serialize.save_simple data
+			luastmt = "obj = " .. text
+			assert (loadstring (luastmt or "")) ()
+			
+         if questInfo ~= nil and questInfo.mobName ~= nil then
+            questOffset = 17
+         else
+            questOffset = 0
+            mouseup(0, "hsMinimize")
+         end
+         --print("Qoffset " .. questOffset)
+			cpList = obj
+			if cpList ~= nil and #cpList > 0 then
+            currentListHeight = line_spacing * #cpList
+				currentListHeight = currentListHeight + offset + 30 + questOffset
+            current_mode = "cp"
+            mouseup(0, "hsMaximize")
+			else
+         
+         end
+			draw_window()
+			write_items("cp")
+			Redraw()
+		elseif (msg == 680) then	-- xcp index, tells GUI which list item to highlight
+			current_index = tonumber(text)
+         draw_window()
+			write_items(current_mode)
+			Redraw()
+		end
+
+	elseif (id == search_destroy_id) then -- S&D
+      if tonumber(msg) == 151 then
+         if questInfo == nil then return end
+         questInfo.completed = true
+         --print("GUI has received info that quest is awaiting turn in!")
+         if current_mode =="cp" and cpList ~= nil then
+            mouseup(0, "hsMaximize")
+            draw_window()
+            write_items("cp")
+            Redraw()
+         end
+         
+      elseif tonumber(msg) == 150 then
+         if current_mode == "gq" then return end
+         questInfo = load( "return "..text)( )
+         if questInfo.mobName == nil then
+            questOffset = 0
+            --print("150 blank list received to extender " .. questOffset)
+         else
+            questOffset = 17
+            --print("150 received to extender " .. questOffset)
+         end
+         if current_mode == "cp" and cpList ~= nil then
+   				currentListHeight = line_spacing * #cpList
+               currentListHeight = currentListHeight + offset + 30 + questOffset
+               win_height = currentListHeight
+         elseif current_mode == nil then
+            currentListHeight = currentListHeight + offset + 30 + questOffset
+         else
+            win_state = "min"
+            mouseup(0, "hsMinimize")
+            draw_window()
+            write_items(current_mode)
+            Redraw()
+            return
+         end
+         --print("150 current mode is " .. tostring(current_mode))
+
+         WindowResize(win, win_width, win_height, ColourNameToRGB("black"))
+         win_state = "max"
+         if #cpList < 1 and questInfo.mobName == nil then
+            win_state = "min"
+            mouseup(0, "hsMinimize")
+         end
+         draw_window()
+         write_items(current_mode)
+         Redraw()
+            
+         if questInfo.mobName ~= nil then DebugNote("Received quest mob: " .. questInfo.mobName) end
+      end
+   end
+
+end
+
+function ResizeMoveCallback()
+	if GetPluginVariable("c293f9e7f04dde889f65cb90", "lock_down_miniwindows") == "1" then
+		return
+	end
+	posx, posy = WindowInfo (win, 17), WindowInfo (win, 18)
+	win_width = win_width + posx - startx
+	
+	startx = posx
+	if (win_width < min_width) then
+		win_width = min_width
+		startx = posx
+	end
+	if win_height < currentListHeight then
+		win_height = win_height + posy - starty
+	else
+		win_height = currentListHeight
+	end
+	starty = posy
+	if (win_height < min_height) then
+		win_height = min_height
+		--starty = windowinfo.window_top+win_height
+		starty = posy
+	end
+	WindowResize(win, win_width, win_height, 0)
+	if (utils.timer() - lastRefresh > REFRESH_DELAY) then
+		draw_window()
+		write_items()
+		--add_resize_tag()
+		Redraw()
+		lastRefresh = utils.timer()
+	end
+end
+
+
+function ResizeReleaseCallback()
+	win_height_maximized = win_height
+	win_width_maximized = win_width
+	draw_window()
+	write_items()
+	--add_resize_tag()
+	Redraw()
+end
+
+function mouseup(flags, hotspot_id)
+	--Note(hotspot_id)
+	
+	if bit.band(flags, 0x20) == 0 then -- left click
+	else
+		context_menu()
+	end
+	if (hotspot_id == "hsGo") then
+		Execute("go")
+		Execute("qs")
+	elseif (hotspot_id == "hsNext") then
+		Execute("nx")
+		Execute("qs")
+	elseif (hotspot_id == "hsQS") then
+		Execute("qs")
+	elseif (hotspot_id == "hsKill") then
+			Execute("autokill")
+	elseif (hotspot_id == "hsHTA") then
+		Execute("ht a")
+	elseif (hotspot_id == "hsRefresh") then
+		-- v3 --
+		if current_mode == "gq" then
+			Execute("qq")
+			--Execute("gq p")
+		else
+			Execute("cp c")
+		end
+		mouseup(0, "hsMaximize")
+	-- v3 --
+	elseif (hotspot_id == "hsReport") then -- gq report
+		Execute("qqreport " .. USER_qq_report_channel)
+	elseif (hotspot_id == "hsClear") then
+		-- v3 --
+		gqList = {}
+		cpList = {}
+		draw_window()
+		write_items()
+		Redraw()
+	elseif (hotspot_id == "hsMinimize") then
+		win_state = "min"
+		win_height = min_height
+		WindowResize(win, win_width, win_height, ColourNameToRGB("black"))
+
+		draw_window()
+		write_items()
+		Redraw()
+	elseif (hotspot_id == "hsMaximize") then
+		if currentListHeight ~= 0 then
+			win_height = currentListHeight
+		else
+			win_height = min_height
+		end
+		win_state = "max"
+		WindowResize(win, win_width, win_height, ColourNameToRGB("black"))
+		draw_window()
+		write_items(current_mode)
+		Redraw()
+	elseif (hotspot_id == "hsFront") then
+		if (IsPluginInstalled(z_order_plugin) and GetPluginInfo(z_order_plugin, 17)) then
+			CallPlugin(z_order_plugin, "boostMe", win)
+		end
+	elseif (hotspot_id == "hsBack") then
+		if (IsPluginInstalled(z_order_plugin) and GetPluginInfo(z_order_plugin, 17)) then
+			CallPlugin(z_order_plugin, "dropMe", win)
+		end
+	elseif (hotspot_id == "hsHelp") then
+		Execute("ww help")
+	end
+end
+
+function mouseup_gq(flags, hotspot_id) -- gq hotspot events
+	if (tonumber(hotspot_id) ~= nil) then
+		Execute("qq " .. hotspot_id)
+	end
+end
+
+function mouseup_list_item(flags, hotspot_id)
+	if (tonumber(hotspot_id) ~= nil) then
+      --print(hotspot_id)
+      --print(flags)
+      if hotspot_id == "99" then
+         if bit.band(flags, 0x10) == 0 then
+            list_item_context_menu("Q")
+         else
+            Execute("quest info")
+         end
+         return
+      end
+		if bit.band(flags, 0x10) == 0 then -- right clicked on list item
+			--print(flags)
+			list_item_context_menu(hotspot_id)
+		elseif bit.band(flags, 0x20) == 0 then -- left click
+			if current_mode == "cp" then
+				Execute("xcp " .. hotspot_id)
+			elseif current_mode == "gq" then
+				Execute("qq " .. hotspot_id)
+			end
+		end
+	end
+end
+
+function mouseup_cp(flags, hotspot_id)
+	if (tonumber(hotspot_id) ~= nil) then
+		if bit.band(flags, 0x20) == 0 then -- left click
+			Execute("xcp " .. hotspot_id)
+		else
+			-- nothing yet
+		end
+	end
+end
+
+function do_trg_cp_complete(name, line, wildcards) 
+	if current_mode == "cp" then
+		mouseup(0, "hsClear")
+		mouseup(0, "hsMinimize")
+	end
+end
+
+function do_trg_gq_complete(name, line, wildcards) 
+	if current_mode == "gq" then
+		mouseup(0, "hsClear")
+		mouseup(0, "hsMinimize") 
+	end
+end
+
+local do_trg_gq_line_index = 0
+
+function do_trg_gq_line(name, line, wildcards) 
+		if (do_trg_gq_line_index == 0) then
+			draw_window()
+		end
+
+		do_trg_gq_line_index = do_trg_gq_line_index + 1
+		
+		local qty = ""
+		if (tonumber(wildcards.qty) > 1) then
+			qty = wildcards.qty .. " * "
+		end
+		
+		local displayText = string.format("%s) %s%s %s - %s", do_trg_gq_line_index, qty, wildcards.mob, wildcards.isdead, wildcards.where)
+		--Note(displayText)
+
+		width   = WindowTextWidth (win, "font", displayText)  -- width of text
+		height  = WindowFontInfo (win, "font", 1)   -- height of the font
+		ascent  = WindowFontInfo (win, "font", 2)   -- ascent (amount above the baseline)
+		descent = WindowFontInfo (win, "font", 3)   -- descent (amount below the baseline)
+		leading = WindowFontInfo (win, "font", 4)   -- leading (space above the highest letter)
+		--Note(string.format("w:%s h:%s asc:%s desc:%s lead:%s", width, height, ascent, descent, leading)) 		
+		
+		WindowText (win, "font", 
+					displayText,   -- text
+					5, (tonumber(do_trg_gq_line_index) * line_spacing) + offset, 0, 0,        -- rectangle
+					ColourNameToRGB ("black"), -- colour
+					false)              -- not Unicode
+				
+end
+
+function do_trg_gq_line_end(name, line, wildcards) 
+	do_trg_gq_line_index = 0
+end
+
+-- \\\  WindowPosition("extender_gui_3f498d929793c12cb70f5999", 50, 50, miniwin.pos_stretch_to_view, miniwin.create_absolute_location);CallPlugin("462b665ecb569efbf261422f", "boostMe", "extender_gui_3f498d929793c12cb70f5999")
+
+function reset_gui(name, line, wildcards) 
+	-- move the window to the new location
+	WindowPosition(win, 50, 50, 
+	miniwin.pos_stretch_to_view, 
+	miniwin.create_absolute_location)
+	
+	if (IsPluginInstalled(z_order_plugin) and GetPluginInfo(z_order_plugin, 17)) then
+		CallPlugin(z_order_plugin, "boostMe", win)
+	end                 
+end
+
+function dragmove(flags, hotspot_id)
+	pos_x = WindowInfo(win, 17) - startx
+	pos_y = WindowInfo(win, 18) - starty
+
+  --print ("moved to position", pos_x, pos_y)
+                                                      
+  -- move the window to the new location
+
+  WindowPosition(win, pos_x, pos_y, 
+                 miniwin.pos_stretch_to_view, 
+                 miniwin.create_absolute_location)
+    
+end -- dragmove
+
+function dragrelease(flags, hotspot_id)
+--  print ("mouse drag release for " .. hotspot_id)
+--  print ("released at position", WindowInfo (win, 17), WindowInfo (win, 18))
+
+end -- dragrelease
+
+function OnPluginClose ()
+	WindowShow(win, false) -- hide window, refresh screen
+end 
+
+function dbcheck(code)
+
+	if code ~= sqlite3.OK and    -- no error
+		code ~= sqlite3.ROW and   -- completed OK with another row of data
+		code ~= sqlite3.DONE then -- completed OK, no more rows
+		local err = db:errmsg ()  -- the rollback will change the error message
+		db:exec("ROLLBACK")      -- rollback any transaction to unlock the database
+		error (err, 2)            -- show error in caller's context
+	end
+
+end
+
+function fixsql(s)
+	if s then
+		return "'" .. (string.gsub (s, "'", "''")) .. "'" -- replace single quotes with two lots of single quotes
+	else
+		return "NULL"
+	end
+end
+
+function DebugNote(text)
+	if GetPluginVariable(mapper_extender_id, "Debug") == "1" then
+		Note("ExtenderGUI ~ " .. text)
+	end
+end
+
+function OnPluginInstall()
+	InstallMessage()
+	create_win()
+end
+
+function OnPluginSaveState()
+	SetVariable("fontName", setting_fontName)
+	SetVariable("fontSize", setting_fontSize)
+	SetVariable("fontColour", setting_fontColour)
+   SetVariable("color_main_output", color_main_output)
+   SetVariable("color_list_headers", color_list_headers)
+   SetVariable("color_main_mobs", color_main_mobs)
+   SetVariable("color_main_areas", color_main_areas)
+   SetVariable("color_unknown_location", color_unknown_location)
+   SetVariable("color_gui_list_color", color_gui_list_color)
+   SetVariable("color_gui_current_target", color_gui_current_target)
+   SetVariable("color_gui_quest", color_gui_quest)
+   SetVariable("color_gui_quest_complete", color_gui_quest_complete)
+   
+
+	SetVariable("WinPosX", pos_x)
+	SetVariable("WinPosY", pos_y)
+	SetVariable("WinState", win_state)
+	SetVariable("WinSizeX", win_width)
+	SetVariable("WinSizeY", win_height)
+	SetVariable("WinMaxX", win_width_maximized)
+	SetVariable("WinMaxY", win_height_maximized)
+end
+
+function InstallMessage()
+	ColourNote("cadetblue", "", "+======================[", "gold", "", "Win", "palegoldenrod", "", "kleG", "gold", "", "old", "cadetblue", "", "]======================+")
+	ColourNote("cadetblue", "", "+ Extender GUI Installed - type 'extender help'          +")
+	ColourNote("cadetblue", "", "+========================================================+")
+end
+
+
+]]>
+</script>
+
+</muclient>
